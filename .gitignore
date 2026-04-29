@@ -1,0 +1,12 @@
+node_modules
+.env
+dist
+build
+.next
+
+# OS
+.DS_Store
+
+# logs
+*.log
+notes.txt
