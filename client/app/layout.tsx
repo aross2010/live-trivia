@@ -21,10 +21,10 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className="scroll-smooth! overflow-x-hidden"
+      className="scroll-smooth! overflow-x-hidden flex flex-col items-center justify-center"
     >
       <body
-        className={`${jost.className} text-gray-50 bg-gray-950 tracking-wide max-w-[100vw] overflow-x-hidden flex flex-col min-h-screen`}
+        className={`${jost.className} text-gray-50 bg-mist-900 tracking-wide max-w-250 overflow-x-hidden flex flex-col min-h-screen`}
       >
         <main className="flex flex-col items-center gap-36 px-4 justify-center py-12">
           {children}
