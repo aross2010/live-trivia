@@ -1,1 +1,12 @@
 @import 'tailwindcss';
+
+@keyframes slide-in-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(72px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}

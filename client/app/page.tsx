@@ -8,13 +8,19 @@ export default function Home() {
   const router = useRouter()
   const [modalOpen, setModalOpen] = useState(false)
   const [playerName, setPlayerName] = useState('')
+  const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(
+    null,
+  )
 
-  const joinGame = (category: any) => setModalOpen(true)
+  const joinGame = (categoryId: number) => {
+    setSelectedCategoryId(categoryId)
+    setModalOpen(true)
+  }
 
   const submitName = (name: string) => {
     setModalOpen(false)
     router.push(
-      `/game?name=${encodeURIComponent(name)}&categoryId=${encodeURIComponent(String(categories[0].categoryId))}`,
+      `/game?name=${encodeURIComponent(name)}&categoryId=${encodeURIComponent(String(selectedCategoryId))}`,
     )
   }
 
@@ -25,7 +31,7 @@ export default function Home() {
           <button
             key={idx}
             className="bg-gray-50/25 p-4 hover:bg-gray-50/40 hover:scale-105 hover:cursor-pointer transition"
-            onClick={() => joinGame(cat)}
+            onClick={() => joinGame(cat.categoryId)}
           >
             <div className="flex items-center gap-4 mb-4">
               <cat.icon

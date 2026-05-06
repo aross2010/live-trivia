@@ -1,17 +1,26 @@
 'use client'
 
-import { useSearchParams } from 'next/navigation'
-import { useEffect, useMemo, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Player, Question, Letters } from '@/lib/types'
 import { categories } from '@/lib/data'
 import { FiCheck, FiX } from 'react-icons/fi'
+import Modal from '@/components/Modal'
+
+const SESSION_KEY = 'trivia_session_token'
+const WS_URL_KEY = 'trivia_ws_url'
+const DEFAULT_WS_URL = 'ws://localhost/ws'
+
+const MAX_RECONNECT_ATTEMPTS = 5
 
 export default function Game() {
-  const [ws, setWs] = useState<WebSocket | null>(null)
+  const router = useRouter()
+
+  const wsRef = useRef<WebSocket | null>(null)
   const [status, setStatus] = useState('Connecting...')
   const [playerId, setPlayerId] = useState<number | null>(null)
   const [players, setPlayers] = useState<Player[]>([])
-  const [questions, setQuestions] = useState<Question[]>([]) // top of stack is current question
+  const [questions, setQuestions] = useState<Question[]>([])
   const [numQuestions, setNumQuestions] = useState(0)
   const [scores, setScores] = useState<Record<number, number>>({})
   const [turnState, setTurnState] = useState<{
@@ -22,18 +31,44 @@ export default function Game() {
   } | null>(null)
   const [turnSecondsRemaining, setTurnSecondsRemaining] = useState(0)
 
+  const [showModal, setShowModal] = useState(false)
+  const [finalQuestions, setFinalQuestions] = useState<Question[]>([])
+  const [finalPlayers, setFinalPlayers] = useState<Player[]>([])
+  const [finalScores, setFinalScores] = useState<Record<number, number>>({})
+  const [rematchVotes, setRematchVotes] = useState(0)
+  const [rematchFailed, setRematchFailed] = useState(false)
+  const [hasVotedRematch, setHasVotedRematch] = useState(false)
+  const [opponentLeft, setOpponentLeft] = useState(false)
+  const [animKey, setAnimKey] = useState(0)
+
+  // refs so onmessage closure can read current state without going stale
+  const questionsRef = useRef<Question[]>([])
+  const playersRef = useRef<Player[]>([])
+  const scoresRef = useRef<Record<number, number>>({})
+
   const searchParams = useSearchParams()
   const name = searchParams.get('name')
   const categoryId = searchParams.get('categoryId')
+  const wsUrl = searchParams.get('wsUrl') ?? DEFAULT_WS_URL
 
-  console.log('Game page query:', { name, categoryId })
+  useEffect(() => {
+    questionsRef.current = questions
+  }, [questions])
+
+  useEffect(() => {
+    playersRef.current = players
+  }, [players])
+
+  useEffect(() => {
+    scoresRef.current = scores
+  }, [scores])
 
   const addQuestionResponse = (
     answerChoice: string,
-    playerId: number,
+    responderId: number,
     correct: boolean,
+    correctAnswer?: Letters,
   ) => {
-    // add the current question history with the player that guessed
     setQuestions((prev) => {
       const updated = [...prev]
       const current = updated[updated.length - 1]
@@ -41,9 +76,12 @@ export default function Game() {
       if (current) {
         current.history.push({
           guess: answerChoice as Letters,
-          playerId: playerId,
-          correct: correct,
+          playerId: responderId,
+          correct,
         })
+        if (correctAnswer) {
+          current.correctAnswer = correctAnswer
+        }
       }
 
       return updated
@@ -80,103 +118,246 @@ export default function Game() {
   }, [turnState, playerId])
 
   useEffect(() => {
-    const socket = new WebSocket(
-      `ws://localhost:3001?categoryId=${categoryId}&name=${name}`,
-    )
+    let cancelled = false
+    let reconnectAttempts = 0
+    const reconnectTimers: ReturnType<typeof setTimeout>[] = []
 
-    socket.onopen = () => {
-      setStatus('Connected')
-    }
+    const connect = () => {
+      if (cancelled) return
 
-    socket.onmessage = (msg) => {
-      const data = JSON.parse(msg.data)
+      const token = sessionStorage.getItem(SESSION_KEY)
+      const base = token ? (sessionStorage.getItem(WS_URL_KEY) ?? wsUrl) : wsUrl
+      const url =
+        `${base}?categoryId=${categoryId}&name=${name}` +
+        (token ? `&sessionToken=${token}` : '')
 
-      console.log('WS:', data)
+      const socket = new WebSocket(url)
+      wsRef.current = socket
 
-      switch (data.type) {
-        // initial connection response, assign player ID
-        case 'CONNECTED':
-          setPlayerId(data.playerId)
-          break
+      socket.onopen = () => {
+        if (!cancelled) {
+          reconnectAttempts = 0
+          setStatus('Connected')
+        }
+      }
 
-        // player waiting for match
-        case 'WAITING':
-          setStatus('Waiting for opponent...')
-          break
+      socket.onmessage = (msg) => {
+        if (cancelled) return
+        const data = JSON.parse(msg.data)
 
-        // connected to opponent, match found
-        case 'MATCH_FOUND':
-          setStatus('Match found!')
-          setPlayers(data.players)
-          setNumQuestions(data.numQuestions)
-          break
+        console.log('WS:', data)
 
-        // new question received
-        case 'QUESTION':
-          setQuestions((prev) => {
-            const newQuestion = {
-              question: data.question,
-              choices: data.choices,
-              history: [],
+        switch (data.type) {
+          case 'CONNECTED':
+            sessionStorage.removeItem(WS_URL_KEY)
+            setPlayerId(data.playerId)
+            if (data.sessionToken) {
+              sessionStorage.setItem(SESSION_KEY, data.sessionToken)
             }
-            return [...prev, newQuestion]
-          })
-          break
+            break
 
-        // wrong answer response
-        case 'WRONG':
-          setStatus('Wrong answer')
-          addQuestionResponse(data.guessed, data.playerId, false)
-          break
+          case 'WAITING':
+            setStatus('Waiting for opponent...')
+            break
 
-        // correct answer
-        case 'RESULT':
-          addQuestionResponse(data.guessed, data.winnerId, data.correct)
-          setScores(data.scores ?? {})
-          setTurnState(null)
-          setStatus(`Correct: ${data.winnerId ?? 'none'}`)
-          break
+          case 'REDIRECT':
+            sessionStorage.setItem(WS_URL_KEY, data.url)
+            socket.close()
+            break
 
-        case 'YOUR_TURN':
-          setStatus('Your turn!')
-          break
+          case 'MATCH_FOUND':
+            setStatus('Match found!')
+            setPlayers(data.players)
+            setNumQuestions(data.numQuestions)
+            setQuestions([])
+            setScores({})
+            setTurnState(null)
+            setShowModal(false)
+            setRematchVotes(0)
+            setRematchFailed(false)
+            setHasVotedRematch(false)
+            setOpponentLeft(false)
+            break
 
-        case 'TURN_STATE':
-          setTurnState({
-            phase: data.phase,
-            playerId: data.playerId ?? null,
-            durationMs: data.durationMs,
-            endsAt: data.endsAt,
-          })
-          break
+          case 'QUESTION':
+            setAnimKey((prev) => prev + 1)
+            setQuestions((prev) => [
+              ...prev,
+              {
+                question: data.question,
+                choices: data.choices,
+                history: [],
+              },
+            ])
+            break
 
-        // protected in UI, rare case of desync or malicious user
-        case 'NOT_YOUR_TURN':
-          setStatus('Not your turn')
-          break
+          case 'WRONG':
+            setStatus('Wrong answer')
+            addQuestionResponse(data.guessed, data.playerId, false)
+            break
 
-        case 'GAME_OVER':
-          setScores(data.scores ?? {})
-          setTurnState(null)
-          setStatus('Game Over')
-          break
+          case 'RESULT':
+            addQuestionResponse(
+              data.guessed,
+              data.winnerId,
+              true,
+              data.correctAnswer as Letters,
+            )
+            setScores(data.scores ?? {})
+            setTurnState(null)
+            setStatus(`Correct: ${data.winnerId ?? 'none'}`)
+            break
+
+          case 'YOUR_TURN':
+            setStatus('Your turn!')
+            break
+
+          case 'TURN_STATE':
+            setTurnState({
+              phase: data.phase,
+              playerId: data.playerId ?? null,
+              durationMs: data.durationMs,
+              endsAt: data.endsAt,
+            })
+            break
+
+          case 'NOT_YOUR_TURN':
+            setStatus('Not your turn')
+            break
+
+          case 'GAME_OVER':
+            setFinalQuestions([...questionsRef.current])
+            setFinalPlayers([...playersRef.current])
+            setFinalScores(data.scores ?? {})
+            setTurnState(null)
+            setStatus('Game Over')
+            setShowModal(true)
+            break
+
+          case 'REMATCH_VOTE':
+            setRematchVotes(data.votes)
+            break
+
+          case 'REMATCH_FAILED':
+            setRematchFailed(true)
+            setRematchVotes(0)
+            break
+
+          case 'OPPONENT_LEFT':
+            setFinalQuestions([...questionsRef.current])
+            setFinalPlayers([...playersRef.current])
+            setFinalScores({ ...scoresRef.current })
+            setOpponentLeft(true)
+            setTurnState(null)
+            setStatus('Opponent left the game')
+            setShowModal(true)
+            break
+
+          case 'RECONNECT_STATE': {
+            if (data.sessionToken) {
+              sessionStorage.setItem(SESSION_KEY, data.sessionToken)
+            }
+            setPlayerId(data.playerId)
+
+            const m = data.match
+            if (!m) break
+
+            setPlayers(m.players)
+            setNumQuestions(m.numQuestions)
+            setScores(m.scores)
+
+            const rebuilt: Question[] = m.questions.map(
+              (q: {
+                question: string
+                choices: Record<Letters, string>
+                history: {
+                  playerId: number
+                  guess: Letters
+                  correct: boolean
+                }[]
+                correctAnswer: Letters | null
+              }) => ({
+                question: q.question,
+                choices: q.choices,
+                history: q.history,
+                correctAnswer: q.correctAnswer ?? undefined,
+              }),
+            )
+
+            setQuestions(rebuilt)
+            setAnimKey((prev) => prev + 1)
+
+            if (m.ended) {
+              setFinalQuestions(rebuilt)
+              setFinalPlayers(m.players)
+              setFinalScores(m.scores)
+              setTurnState(null)
+              setStatus('Game Over')
+              setShowModal(true)
+            } else if (m.turnPhase && m.turnEndsAt) {
+              setTurnState({
+                phase: m.turnPhase,
+                playerId: m.turnPlayerId ?? null,
+                durationMs: m.turnDurationMs,
+                endsAt: m.turnEndsAt,
+              })
+              setStatus('Reconnected')
+            } else {
+              setStatus('Reconnected')
+            }
+            break
+          }
+
+          case 'SESSION_EXPIRED':
+            sessionStorage.removeItem(SESSION_KEY)
+            router.push('/')
+            break
+        }
+      }
+
+      socket.onclose = () => {
+        if (cancelled) return
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttempts++
+          setStatus(
+            `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`,
+          )
+          const id = setTimeout(connect, 1500 * reconnectAttempts)
+          reconnectTimers.push(id)
+        } else {
+          setStatus('Connection lost — please refresh')
+        }
       }
     }
 
-    setWs(socket)
+    const initTimer = setTimeout(connect, 0)
 
-    return () => socket.close()
+    return () => {
+      cancelled = true
+      clearTimeout(initTimer)
+      reconnectTimers.forEach(clearTimeout)
+      wsRef.current?.close()
+    }
   }, [])
 
   function answer(choice: string) {
-    if (!ws) return
+    wsRef.current?.send(JSON.stringify({ type: 'ANSWER', answer: choice }))
+  }
 
-    ws.send(
-      JSON.stringify({
-        type: 'ANSWER',
-        answer: choice,
-      }),
-    )
+  function sendRematch() {
+    setHasVotedRematch(true)
+    wsRef.current?.send(JSON.stringify({ type: 'REMATCH' }))
+  }
+
+  function endGame() {
+    router.push('/')
+  }
+
+  function leaveGame() {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'QUIT' }))
+    }
+    router.push('/')
   }
 
   const categoryName = useMemo(() => {
@@ -201,15 +382,23 @@ export default function Game() {
     : (turnState?.playerId ?? null)
   const isPlayerTurn =
     !turnState || isSharedTurn || turnState.playerId === playerId
-  const turnLabel =
-    !turnState || isSharedTurn
-      ? 'Both players can guess'
-      : turnState.playerId === player1?.playerId
-        ? `${player1?.name}'s turn`
-        : `${player2?.name}'s turn`
   const turnProgress = turnState
     ? Math.max(0, (turnSecondsRemaining / (turnState.durationMs / 1000)) * 100)
     : 0
+
+  const myFinalPlayer = finalPlayers.find((p) => p.playerId === playerId)
+  const oppFinalPlayer = finalPlayers.find((p) => p.playerId !== playerId)
+  const myFinalScore = finalScores[myFinalPlayer?.playerId ?? -1] ?? 0
+  const oppFinalScore = finalScores[oppFinalPlayer?.playerId ?? -1] ?? 0
+  const winnerText = opponentLeft
+    ? 'Opponent left the game'
+    : !myFinalPlayer || !oppFinalPlayer
+      ? ''
+      : myFinalScore > oppFinalScore
+        ? `${myFinalPlayer.name} wins!`
+        : oppFinalScore > myFinalScore
+          ? `${oppFinalPlayer.name} wins!`
+          : "It's a tie!"
 
   return (
     <div className="flex flex-col items-center gap-4">
@@ -221,8 +410,18 @@ export default function Game() {
             : `${currentTurnPlayerId == player1?.playerId ? '->' : ''} ${player1?.name} (${player1Score}) vs ${player2.name} (${player2Score}) ${currentTurnPlayerId == player2.playerId ? '<-' : ''}`
           : 'Waiting for an opponent...'}
       </h2>
+      <button
+        onClick={leaveGame}
+        className="text-sm text-gray-500 hover:text-gray-300 transition"
+      >
+        ← Leave game
+      </button>
       {question && (
-        <div className="flex flex-col gap-4 mt-12 w-full max-w-2xl">
+        <div
+          key={animKey}
+          style={{ animation: 'slide-in-from-right 0.45s ease-out both' }}
+          className="flex flex-col gap-4 mt-12 w-full max-w-2xl"
+        >
           <h3 className="text-xl text-left">{question}</h3>
           <small className="text-left text-gray-300">
             {turnSecondsRemaining}s
@@ -303,6 +502,74 @@ export default function Game() {
         <small>Is Player Turn: {isPlayerTurn.toString()}</small>
         <small>Turn Seconds Remaining: {turnSecondsRemaining}</small>
       </div>
+
+      <Modal
+        open={showModal}
+        onClose={() => {}}
+        className="max-w-2xl"
+      >
+        <div className="flex flex-col gap-6">
+          <div className="text-center">
+            <h2 className="text-2xl font-bold">Game Over</h2>
+            <p className="mt-1 text-gray-400">{winnerText}</p>
+          </div>
+
+          <div className="flex flex-col gap-3 max-h-96 overflow-y-auto pr-1">
+            {finalQuestions.map((q, i) => {
+              const winEntry = q.history.find((h) => h.correct)
+              const answerer = finalPlayers.find(
+                (p) => p.playerId === winEntry?.playerId,
+              )
+              return (
+                <div
+                  key={i}
+                  className="rounded-lg bg-white/5 p-4"
+                >
+                  <p className="mb-1 text-xs text-gray-500 uppercase tracking-wide">
+                    Question {i + 1}
+                  </p>
+                  <p className="mb-3 font-medium leading-snug">{q.question}</p>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="rounded bg-green-500/20 px-2 py-0.5 font-mono text-green-400">
+                      {q.correctAnswer}
+                    </span>
+                    <span className="text-gray-300">
+                      {q.correctAnswer ? q.choices[q.correctAnswer] : '—'}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm text-gray-500">
+                    {answerer
+                      ? `Answered by ${answerer.name}`
+                      : 'No one answered'}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={sendRematch}
+              disabled={hasVotedRematch || rematchFailed || opponentLeft}
+              className="flex-1 rounded-lg py-3 font-semibold transition bg-green-600 hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {opponentLeft
+                ? 'Opponent left'
+                : rematchFailed
+                  ? 'Rematch failed'
+                  : hasVotedRematch
+                    ? `Waiting… (${rematchVotes}/2)`
+                    : 'Rematch'}
+            </button>
+            <button
+              onClick={endGame}
+              className="flex-1 rounded-lg py-3 font-semibold transition bg-white/10 hover:bg-white/20"
+            >
+              End Game
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

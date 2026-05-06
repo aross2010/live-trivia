@@ -8,6 +8,7 @@ export type Question = {
     guess: Letters
     correct: boolean
   }[] // in order history of guesses, display in UI, allow to take turns after initial response
+  correctAnswer?: Letters
 }
 
 // two players
