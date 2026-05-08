@@ -452,7 +452,7 @@ const startMatch = async (p1, p2, categoryId) => {
     })
   })
 
-  sendQuestion(match)
+  setTimeout(() => sendQuestion(match), 3000) // give 3 seconds for countdown animation
 }
 
 const clearTurnTimer = (match) => {

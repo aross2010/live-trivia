@@ -3,7 +3,7 @@ import { FaBasketball, FaClapperboard } from 'react-icons/fa6'
 
 export const categories = [
   {
-    title: 'General Knowledge',
+    title: 'General',
     description:
       'Covers topics like history, geography, science, math, and more.',
     icon: FaLightbulb,

@@ -45,7 +45,12 @@ export default function Modal({ open, onClose, children, className }: Props) {
       <div
         role="dialog"
         aria-modal="true"
-        className={`relative bg-mist-800 p-6 rounded-lg w-full max-w-150 transform transition-all ${visible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-4 scale-95'} ${className ?? ''}`}
+        className={`relative p-6 rounded-sm w-full max-w-150 transform transition-all ${visible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-4 scale-95'} ${className ?? ''}`}
+        style={{
+          background: 'linear-gradient(135deg, rgba(13,23,48,0.98), rgba(5,8,19,0.98))',
+          border: '1px solid rgba(0,191,255,0.18)',
+          boxShadow: '0 0 60px rgba(0,191,255,0.08), 0 20px 60px rgba(0,0,0,0.8)',
+        }}
       >
         {children}
       </div>

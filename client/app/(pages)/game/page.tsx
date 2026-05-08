@@ -4,20 +4,19 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Player, Question, Letters } from '@/lib/types'
 import { categories } from '@/lib/data'
-import { FiCheck, FiX } from 'react-icons/fi'
-import Modal from '@/components/Modal'
+import Scoreboard from '@/components/scoreboard'
+import QuestionCard from '@/components/question-card'
+import GameOverModal from '@/components/game-over-modal'
 
 const SESSION_KEY = 'trivia_session_token'
 const WS_URL_KEY = 'trivia_ws_url'
 const DEFAULT_WS_URL = 'ws://localhost/ws'
-
 const MAX_RECONNECT_ATTEMPTS = 5
 
 export default function Game() {
   const router = useRouter()
-
   const wsRef = useRef<WebSocket | null>(null)
-  const [status, setStatus] = useState('Connecting...')
+
   const [playerId, setPlayerId] = useState<number | null>(null)
   const [players, setPlayers] = useState<Player[]>([])
   const [questions, setQuestions] = useState<Question[]>([])
@@ -30,7 +29,6 @@ export default function Game() {
     endsAt: number
   } | null>(null)
   const [turnSecondsRemaining, setTurnSecondsRemaining] = useState(0)
-
   const [showModal, setShowModal] = useState(false)
   const [finalQuestions, setFinalQuestions] = useState<Question[]>([])
   const [finalPlayers, setFinalPlayers] = useState<Player[]>([])
@@ -40,11 +38,14 @@ export default function Game() {
   const [hasVotedRematch, setHasVotedRematch] = useState(false)
   const [opponentLeft, setOpponentLeft] = useState(false)
   const [animKey, setAnimKey] = useState(0)
+  const [countdown, setCountdown] = useState<number | null>(null)
 
-  // refs so onmessage closure can read current state without going stale
   const questionsRef = useRef<Question[]>([])
   const playersRef = useRef<Player[]>([])
   const scoresRef = useRef<Record<number, number>>({})
+  const playerIdRef = useRef<number | null>(null)
+  const numQuestionsRef = useRef<number>(0)
+  const mathWinTriggeredRef = useRef(false)
 
   const searchParams = useSearchParams()
   const name = searchParams.get('name')
@@ -54,14 +55,18 @@ export default function Game() {
   useEffect(() => {
     questionsRef.current = questions
   }, [questions])
-
   useEffect(() => {
     playersRef.current = players
   }, [players])
-
   useEffect(() => {
     scoresRef.current = scores
   }, [scores])
+  useEffect(() => {
+    playerIdRef.current = playerId
+  }, [playerId])
+  useEffect(() => {
+    numQuestionsRef.current = numQuestions
+  }, [numQuestions])
 
   const addQuestionResponse = (
     answerChoice: string,
@@ -72,50 +77,37 @@ export default function Game() {
     setQuestions((prev) => {
       const updated = [...prev]
       const current = updated[updated.length - 1]
-
       if (current) {
         current.history.push({
           guess: answerChoice as Letters,
           playerId: responderId,
           correct,
         })
-        if (correctAnswer) {
-          current.correctAnswer = correctAnswer
-        }
+        if (correctAnswer) current.correctAnswer = correctAnswer
       }
-
       return updated
     })
   }
+
+  useEffect(() => {
+    if (!countdown) return
+    const id = setTimeout(() => setCountdown(countdown - 1), 1000)
+    return () => clearTimeout(id)
+  }, [countdown])
 
   useEffect(() => {
     if (!turnState) {
       setTurnSecondsRemaining(0)
       return
     }
-
-    const updateRemaining = () => {
+    const update = () =>
       setTurnSecondsRemaining(
         Math.max(0, Math.ceil((turnState.endsAt - Date.now()) / 1000)),
       )
-    }
-
-    updateRemaining()
-    const timerId = setInterval(updateRemaining, 250)
-
-    return () => clearInterval(timerId)
+    update()
+    const id = setInterval(update, 250)
+    return () => clearInterval(id)
   }, [turnState?.endsAt])
-
-  useEffect(() => {
-    if (!turnState) return
-
-    if (turnState.phase === 'shared') {
-      setStatus('Both players can guess')
-      return
-    }
-
-    setStatus(turnState.playerId === playerId ? 'Your turn!' : 'Opponent turn')
-  }, [turnState, playerId])
 
   useEffect(() => {
     let cancelled = false
@@ -124,7 +116,6 @@ export default function Game() {
 
     const connect = () => {
       if (cancelled) return
-
       const token = sessionStorage.getItem(SESSION_KEY)
       const base = token ? (sessionStorage.getItem(WS_URL_KEY) ?? wsUrl) : wsUrl
       const url =
@@ -135,29 +126,24 @@ export default function Game() {
       wsRef.current = socket
 
       socket.onopen = () => {
-        if (!cancelled) {
-          reconnectAttempts = 0
-          setStatus('Connected')
-        }
+        if (!cancelled) reconnectAttempts = 0
       }
 
       socket.onmessage = (msg) => {
         if (cancelled) return
         const data = JSON.parse(msg.data)
-
         console.log('WS:', data)
 
         switch (data.type) {
           case 'CONNECTED':
             sessionStorage.removeItem(WS_URL_KEY)
             setPlayerId(data.playerId)
-            if (data.sessionToken) {
+            playerIdRef.current = data.playerId
+            if (data.sessionToken)
               sessionStorage.setItem(SESSION_KEY, data.sessionToken)
-            }
             break
 
           case 'WAITING':
-            setStatus('Waiting for opponent...')
             break
 
           case 'REDIRECT':
@@ -166,9 +152,9 @@ export default function Game() {
             break
 
           case 'MATCH_FOUND':
-            setStatus('Match found!')
             setPlayers(data.players)
             setNumQuestions(data.numQuestions)
+            numQuestionsRef.current = data.numQuestions
             setQuestions([])
             setScores({})
             setTurnState(null)
@@ -177,40 +163,65 @@ export default function Game() {
             setRematchFailed(false)
             setHasVotedRematch(false)
             setOpponentLeft(false)
+            mathWinTriggeredRef.current = false
+            setCountdown(3)
             break
 
           case 'QUESTION':
+            if (mathWinTriggeredRef.current) break
             setAnimKey((prev) => prev + 1)
             setQuestions((prev) => [
               ...prev,
-              {
-                question: data.question,
-                choices: data.choices,
-                history: [],
-              },
+              { question: data.question, choices: data.choices, history: [] },
             ])
             break
 
           case 'WRONG':
-            setStatus('Wrong answer')
             addQuestionResponse(data.guessed, data.playerId, false)
             break
 
-          case 'RESULT':
+          case 'RESULT': {
             addQuestionResponse(
               data.guessed,
               data.winnerId,
               true,
               data.correctAnswer as Letters,
             )
-            setScores(data.scores ?? {})
+            const newScores = data.scores ?? {}
+            setScores(newScores)
             setTurnState(null)
-            setStatus(`Correct: ${data.winnerId ?? 'none'}`)
-            break
 
-          case 'YOUR_TURN':
-            setStatus('Your turn!')
+            if (!mathWinTriggeredRef.current) {
+              const N = numQuestionsRef.current
+              const myId = playerIdRef.current
+              if (N > 0 && myId !== null) {
+                const myPlayer = playersRef.current.find(
+                  (p) => p.playerId === myId,
+                )
+                const oppPlayer = playersRef.current.find(
+                  (p) => p.playerId !== myId,
+                )
+                if (myPlayer && oppPlayer) {
+                  const remaining = N - questionsRef.current.length
+                  const s1 = newScores[myPlayer.playerId] ?? 0
+                  const s2 = newScores[oppPlayer.playerId] ?? 0
+                  if (
+                    remaining > 0 &&
+                    (s1 > s2 + remaining || s2 > s1 + remaining)
+                  ) {
+                    mathWinTriggeredRef.current = true
+                    setTimeout(() => {
+                      setFinalQuestions([...questionsRef.current])
+                      setFinalPlayers([...playersRef.current])
+                      setFinalScores(newScores)
+                      setShowModal(true)
+                    }, 900)
+                  }
+                }
+              }
+            }
             break
+          }
 
           case 'TURN_STATE':
             setTurnState({
@@ -221,16 +232,11 @@ export default function Game() {
             })
             break
 
-          case 'NOT_YOUR_TURN':
-            setStatus('Not your turn')
-            break
-
           case 'GAME_OVER':
             setFinalQuestions([...questionsRef.current])
             setFinalPlayers([...playersRef.current])
             setFinalScores(data.scores ?? {})
             setTurnState(null)
-            setStatus('Game Over')
             setShowModal(true)
             break
 
@@ -249,21 +255,24 @@ export default function Game() {
             setFinalScores({ ...scoresRef.current })
             setOpponentLeft(true)
             setTurnState(null)
-            setStatus('Opponent left the game')
             setShowModal(true)
             break
 
           case 'RECONNECT_STATE': {
-            if (data.sessionToken) {
+            if (data.sessionToken)
               sessionStorage.setItem(SESSION_KEY, data.sessionToken)
-            }
             setPlayerId(data.playerId)
+            playerIdRef.current = data.playerId
 
             const m = data.match
-            if (!m) break
+            if (!m) {
+              sessionStorage.removeItem(SESSION_KEY)
+              break
+            }
 
             setPlayers(m.players)
             setNumQuestions(m.numQuestions)
+            numQuestionsRef.current = m.numQuestions
             setScores(m.scores)
 
             const rebuilt: Question[] = m.questions.map(
@@ -292,7 +301,6 @@ export default function Game() {
               setFinalPlayers(m.players)
               setFinalScores(m.scores)
               setTurnState(null)
-              setStatus('Game Over')
               setShowModal(true)
             } else if (m.turnPhase && m.turnEndsAt) {
               setTurnState({
@@ -301,9 +309,6 @@ export default function Game() {
                 durationMs: m.turnDurationMs,
                 endsAt: m.turnEndsAt,
               })
-              setStatus('Reconnected')
-            } else {
-              setStatus('Reconnected')
             }
             break
           }
@@ -319,19 +324,13 @@ export default function Game() {
         if (cancelled) return
         if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
           reconnectAttempts++
-          setStatus(
-            `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`,
-          )
           const id = setTimeout(connect, 1500 * reconnectAttempts)
           reconnectTimers.push(id)
-        } else {
-          setStatus('Connection lost — please refresh')
         }
       }
     }
 
     const initTimer = setTimeout(connect, 0)
-
     return () => {
       cancelled = true
       clearTimeout(initTimer)
@@ -349,10 +348,6 @@ export default function Game() {
     wsRef.current?.send(JSON.stringify({ type: 'REMATCH' }))
   }
 
-  function endGame() {
-    router.push('/')
-  }
-
   function leaveGame() {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'QUIT' }))
@@ -360,19 +355,15 @@ export default function Game() {
     router.push('/')
   }
 
-  const categoryName = useMemo(() => {
-    return categories.find((cat) => cat.categoryId === Number(categoryId))
-      ?.title
-  }, [categoryId])
+  const categoryName = useMemo(
+    () =>
+      categories.find((cat) => cat.categoryId === Number(categoryId))?.title,
+    [categoryId],
+  )
 
   const currentQuestion = questions[questions.length - 1]
-  const question = currentQuestion?.question
-  const choices = currentQuestion?.choices ?? {}
-  const questionNumber = questions.length
-
   const player1 = players.find((p) => p.playerId === playerId)
   const player2 = players.find((p) => p.playerId !== playerId)
-
   const player1Score = scores[player1?.playerId ?? -1] ?? 0
   const player2Score = scores[player2?.playerId ?? -1] ?? 0
 
@@ -382,194 +373,92 @@ export default function Game() {
     : (turnState?.playerId ?? null)
   const isPlayerTurn =
     !turnState || isSharedTurn || turnState.playerId === playerId
+  const isOpponentTurn =
+    !!turnState && !isSharedTurn && turnState.playerId !== playerId
   const turnProgress = turnState
     ? Math.max(0, (turnSecondsRemaining / (turnState.durationMs / 1000)) * 100)
     : 0
-
-  const myFinalPlayer = finalPlayers.find((p) => p.playerId === playerId)
-  const oppFinalPlayer = finalPlayers.find((p) => p.playerId !== playerId)
-  const myFinalScore = finalScores[myFinalPlayer?.playerId ?? -1] ?? 0
-  const oppFinalScore = finalScores[oppFinalPlayer?.playerId ?? -1] ?? 0
-  const winnerText = opponentLeft
-    ? 'Opponent left the game'
-    : !myFinalPlayer || !oppFinalPlayer
-      ? ''
-      : myFinalScore > oppFinalScore
-        ? `${myFinalPlayer.name} wins!`
-        : oppFinalScore > myFinalScore
-          ? `${oppFinalPlayer.name} wins!`
-          : "It's a tie!"
+  const p1Active = !isSharedTurn && currentTurnPlayerId === player1?.playerId
+  const p2Active = !isSharedTurn && currentTurnPlayerId === player2?.playerId
 
   return (
-    <div className="flex flex-col items-center gap-4">
-      <h1 className="text-4xl font-bold">{categoryName}</h1>
-      <h2 className="text-xl mt-4">
-        {player2
-          ? isSharedTurn
-            ? `${player1?.name} (${player1Score}) vs ${player2.name} (${player2Score})`
-            : `${currentTurnPlayerId == player1?.playerId ? '->' : ''} ${player1?.name} (${player1Score}) vs ${player2.name} (${player2Score}) ${currentTurnPlayerId == player2.playerId ? '<-' : ''}`
-          : 'Waiting for an opponent...'}
-      </h2>
+    <div className="flex flex-col items-center gap-4 w-full">
+      <h1
+        className="text-4xl font-black tracking-widest uppercase"
+        style={{
+          color: '#ffc500',
+          textShadow:
+            '0 0 12px rgba(255,197,0,0.6), 0 0 40px rgba(255,197,0,0.2)',
+        }}
+      >
+        {categoryName}
+      </h1>
+
+      {player2 ? (
+        <Scoreboard
+          player1={player1}
+          player2={player2}
+          player1Score={player1Score}
+          player2Score={player2Score}
+          p1Active={p1Active}
+          p2Active={p2Active}
+        />
+      ) : (
+        <p className="text-gray-500 tracking-[0.2em] text-sm uppercase animate-pulse mt-4">
+          Your battle begins shortly...
+        </p>
+      )}
+
       <button
         onClick={leaveGame}
-        className="text-sm text-gray-500 hover:text-gray-300 transition"
+        className="text-xs font-bold tracking-widest uppercase transition-all px-4 py-2 mt-1 rounded-sm border border-red-900/40 text-red-400/60 hover:border-red-500/60 hover:text-red-400 cursor-pointer"
+        style={{ background: 'rgba(180,0,0,0.06)' }}
       >
-        ← Leave game
+        Retreat
       </button>
-      {question && (
-        <div
-          key={animKey}
-          style={{ animation: 'slide-in-from-right 0.45s ease-out both' }}
-          className="flex flex-col gap-4 mt-12 w-full max-w-2xl"
+
+      {countdown ? (
+        <span
+          key={countdown}
+          className="text-[12rem] font-black leading-none mt-8"
+          style={{
+            animation: 'countdown-pop 0.9s ease both',
+            color: '#00e5ff',
+            textShadow: '0 0 40px rgba(0,191,255,0.8), 0 0 80px rgba(0,191,255,0.4)',
+          }}
         >
-          <h3 className="text-xl text-left">{question}</h3>
-          <small className="text-left text-gray-300">
-            {turnSecondsRemaining}s
-          </small>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
-            <div
-              className="h-full rounded-full bg-linear-to-r from-rose-500 via-red-500 to-orange-400 shadow-[0_0_18px_rgba(239,68,68,0.45)] transition-[width] duration-300 ease-linear"
-              style={{ width: `${turnProgress}%` }}
-            />
-          </div>
-
-          <div className="md:grid-cols-2 grid-cols-1 grid gap-2">
-            {Object.entries(choices).map(([key, val]) => {
-              const myGuessForThisAnswer = currentQuestion?.history?.find(
-                (h) => h.playerId === playerId && h.guess === key,
-              )
-              const didIGuessThisAnswer = myGuessForThisAnswer !== undefined
-              const wasThisGuessCorrect = myGuessForThisAnswer?.correct === true
-              const wasThisGuessWrong = myGuessForThisAnswer?.correct === false
-
-              const isCorrectAnswer = wasThisGuessCorrect && didIGuessThisAnswer
-              const isWrongAnswer = wasThisGuessWrong && didIGuessThisAnswer
-
-              const lastGuessInHistory =
-                currentQuestion?.history?.[currentQuestion?.history?.length - 1]
-              const wasILastToGuess = lastGuessInHistory?.playerId === playerId
-
-              let buttonClass =
-                'bg-gray-50/25 p-4 min-h-24 enabled:hover:bg-green-400/25 enabled:hover:scale-102 hover:cursor-pointer transition min-w-full flex flex-col items-start justify-between disabled:opacity-50 disabled:cursor-not-allowed'
-
-              if (isCorrectAnswer) {
-                buttonClass = buttonClass.replace(
-                  'bg-gray-50/25',
-                  'bg-green-500/40',
-                )
-              } else if (isWrongAnswer) {
-                buttonClass = buttonClass.replace(
-                  'bg-gray-50/25',
-                  'bg-red-500/40',
-                )
-              }
-
-              const canAnswer = isPlayerTurn && !wasILastToGuess
-
-              return (
-                <button
-                  key={key}
-                  onClick={() => answer(key)}
-                  className={buttonClass}
-                  disabled={!canAnswer}
-                >
-                  <p className="text-xl">
-                    {isCorrectAnswer ? (
-                      <FiCheck className="text-2xl" />
-                    ) : isWrongAnswer ? (
-                      <FiX className="text-2xl" />
-                    ) : (
-                      `${key}.`
-                    )}
-                  </p>
-                  <p className="text-lg">{val as string}</p>
-                </button>
-              )
-            })}
-          </div>
-          <small className="text-center mt-6 text-gray-300">
-            {questionNumber} / {numQuestions}
-          </small>
-        </div>
+          {countdown}
+        </span>
+      ) : (
+        currentQuestion && (
+          <QuestionCard
+            key={animKey}
+            currentQuestion={currentQuestion}
+            playerId={playerId}
+            isPlayerTurn={isPlayerTurn}
+            turnSecondsRemaining={turnSecondsRemaining}
+            turnProgress={turnProgress}
+            isOpponentTurn={isOpponentTurn}
+            questionNumber={questions.length}
+            numQuestions={numQuestions}
+            onAnswer={answer}
+          />
+        )
       )}
-      <div className="mt-48 flex flex-col gap-4">
-        <small>Status: {status}</small>
-        <small>Player ID: {playerId}</small>
-        <small>Players: {JSON.stringify(players, null, 2)}</small>
-        <small>Questions: {JSON.stringify(questions, null, 2)}</small>
-        <small>Current Turn Player ID: {currentTurnPlayerId}</small>
-        <small>Shared Turn: {isSharedTurn.toString()}</small>
-        <small>Is Player Turn: {isPlayerTurn.toString()}</small>
-        <small>Turn Seconds Remaining: {turnSecondsRemaining}</small>
-      </div>
 
-      <Modal
+      <GameOverModal
         open={showModal}
-        onClose={() => {}}
-        className="max-w-2xl"
-      >
-        <div className="flex flex-col gap-6">
-          <div className="text-center">
-            <h2 className="text-2xl font-bold">Game Over</h2>
-            <p className="mt-1 text-gray-400">{winnerText}</p>
-          </div>
-
-          <div className="flex flex-col gap-3 max-h-96 overflow-y-auto pr-1">
-            {finalQuestions.map((q, i) => {
-              const winEntry = q.history.find((h) => h.correct)
-              const answerer = finalPlayers.find(
-                (p) => p.playerId === winEntry?.playerId,
-              )
-              return (
-                <div
-                  key={i}
-                  className="rounded-lg bg-white/5 p-4"
-                >
-                  <p className="mb-1 text-xs text-gray-500 uppercase tracking-wide">
-                    Question {i + 1}
-                  </p>
-                  <p className="mb-3 font-medium leading-snug">{q.question}</p>
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="rounded bg-green-500/20 px-2 py-0.5 font-mono text-green-400">
-                      {q.correctAnswer}
-                    </span>
-                    <span className="text-gray-300">
-                      {q.correctAnswer ? q.choices[q.correctAnswer] : '—'}
-                    </span>
-                  </div>
-                  <p className="mt-2 text-sm text-gray-500">
-                    {answerer
-                      ? `Answered by ${answerer.name}`
-                      : 'No one answered'}
-                  </p>
-                </div>
-              )
-            })}
-          </div>
-
-          <div className="flex gap-3">
-            <button
-              onClick={sendRematch}
-              disabled={hasVotedRematch || rematchFailed || opponentLeft}
-              className="flex-1 rounded-lg py-3 font-semibold transition bg-green-600 hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {opponentLeft
-                ? 'Opponent left'
-                : rematchFailed
-                  ? 'Rematch failed'
-                  : hasVotedRematch
-                    ? `Waiting… (${rematchVotes}/2)`
-                    : 'Rematch'}
-            </button>
-            <button
-              onClick={endGame}
-              className="flex-1 rounded-lg py-3 font-semibold transition bg-white/10 hover:bg-white/20"
-            >
-              End Game
-            </button>
-          </div>
-        </div>
-      </Modal>
+        finalQuestions={finalQuestions}
+        finalPlayers={finalPlayers}
+        finalScores={finalScores}
+        playerId={playerId}
+        opponentLeft={opponentLeft}
+        hasVotedRematch={hasVotedRematch}
+        rematchFailed={rematchFailed}
+        rematchVotes={rematchVotes}
+        onRematch={sendRematch}
+        onEndGame={() => router.push('/')}
+      />
     </div>
   )
 }
